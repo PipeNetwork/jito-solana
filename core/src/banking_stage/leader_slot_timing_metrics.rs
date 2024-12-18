@@ -52,6 +52,13 @@ impl LeaderExecuteAndCommitTimings {
                 i64
             ),
             (
+                "prepare_record_transactions_us",
+                self.record_transactions_timings
+                    .prepare_record_transactions_us
+                    .0 as i64,
+                i64
+            ),
+            (
                 "hash_us",
                 self.record_transactions_timings.hash_us.0 as i64,
                 i64
