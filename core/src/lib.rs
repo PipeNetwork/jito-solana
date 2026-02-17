@@ -51,6 +51,7 @@ mod shred_fetch_stage;
 pub mod sigverify;
 pub mod sigverify_stage;
 pub mod snapshot_packager_service;
+pub mod solanacdn;
 pub mod staked_nodes_updater_service;
 pub mod stats_reporter_service;
 pub mod system_monitor_service;

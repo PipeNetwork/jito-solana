@@ -135,6 +135,54 @@ impl FromClapArgMatches for RunArgs {
 
         let socket_addr_space = SocketAddrSpace::new(matches.is_present("allow_private_addr"));
 
+        // If the operator requests SolanaCDN shred gating (or Pipe API discovery), ensure we have
+        // enough configuration to bootstrap SolanaCDN.
+        let has_solanacdn_pop = matches.is_present("solanacdn_pop");
+        let has_solanacdn_control = matches.is_present("solanacdn_control");
+        let has_solanacdn_api_token = matches
+            .value_of("solanacdn_api_token")
+            .map(str::trim)
+            .is_some_and(|s| !s.is_empty())
+            || std::env::var("SOLANACDN_AGENT_API_TOKEN")
+                .ok()
+                .is_some_and(|s| !s.trim().is_empty())
+            || std::env::var("PIPE_API_KEY")
+                .ok()
+                .is_some_and(|s| !s.trim().is_empty());
+        let has_solanacdn_discovery =
+            has_solanacdn_pop || has_solanacdn_control || has_solanacdn_api_token;
+        let solanacdn_race_requested = matches
+            .value_of("solanacdn_race")
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                !(v == "false" || v == "0")
+            })
+            .unwrap_or_else(|| matches.is_present("solanacdn_race"));
+
+        if (matches.is_present("solanacdn_only")
+            || matches.is_present("solanacdn_hybrid")
+            || solanacdn_race_requested
+            || matches.is_present("solanacdn_no_repair"))
+            && !has_solanacdn_discovery
+        {
+            return Err(clap::Error::with_description(
+                "SolanaCDN requested but no POP endpoints, control endpoint, or API token configured. Set --solanacdn-api-token (or env SOLANACDN_AGENT_API_TOKEN/PIPE_API_KEY), or provide --solanacdn-pop/--solanacdn-control.",
+                clap::ErrorKind::MissingRequiredArgument,
+            )
+            .into());
+        }
+        if matches.value_of("solanacdn_api_base").is_some()
+            && !has_solanacdn_api_token
+            && !has_solanacdn_pop
+            && !has_solanacdn_control
+        {
+            return Err(clap::Error::with_description(
+                "--solanacdn-api-base requires an API token (use --solanacdn-api-token or env SOLANACDN_AGENT_API_TOKEN/PIPE_API_KEY)",
+                clap::ErrorKind::MissingRequiredArgument,
+            )
+            .into());
+        }
+
         Ok(RunArgs {
             identity_keypair,
             ledger_path,
@@ -151,6 +199,18 @@ impl FromClapArgMatches for RunArgs {
             )?,
         })
     }
+}
+
+fn validate_solanacdn_socket_addr(value: String, arg: &str) -> std::result::Result<(), String> {
+    if value.contains("://") {
+        return Err(format!(
+            "{arg} expects IP:PORT. For https://... control-plane discovery use --solanacdn-api-base"
+        ));
+    }
+    value
+        .parse::<SocketAddr>()
+        .map(|_| ())
+        .map_err(|e| format!("invalid socket address for {arg}: {e}"))
 }
 
 pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 'a> {
@@ -1423,6 +1483,241 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
                 "Use connection-cache crate to send transactions over TPU ports. If not \
                  set,tpu-client-next is used by default.",
             ),
+    )
+    .arg(
+        Arg::with_name("solanacdn_pop")
+            .long("solanacdn-pop")
+            .value_name("IP:PORT")
+            .takes_value(true)
+            .multiple(true)
+            .validator(|value| validate_solanacdn_socket_addr(value, "--solanacdn-pop"))
+            .help("SolanaCDN POP endpoint (repeatable)"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_control")
+            .long("solanacdn-control")
+            .value_name("IP:PORT")
+            .takes_value(true)
+            .validator(|value| validate_solanacdn_socket_addr(value, "--solanacdn-control"))
+            .help("SolanaCDN control-plane endpoint (IP:PORT) for POP discovery (optional; for https://... use --solanacdn-api-base)"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_server_name")
+            .long("solanacdn-server-name")
+            .value_name("SNI")
+            .takes_value(true)
+            .default_value("solanacdn-pop")
+            .help("TLS server name (SNI) for SolanaCDN POP QUIC connections"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_tls_ca_cert_path")
+            .long("solanacdn-tls-ca-cert-path")
+            .value_name("FILE")
+            .takes_value(true)
+            .help("CA bundle (PEM) for SolanaCDN POP TLS verification"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_tls_insecure_skip_verify")
+            .long("solanacdn-tls-insecure-skip-verify")
+            .takes_value(false)
+            .help("Skip SolanaCDN POP TLS certificate verification (dev only)"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_control_server_name")
+            .long("solanacdn-control-server-name")
+            .value_name("SNI")
+            .takes_value(true)
+            .requires("solanacdn_control")
+            .help("TLS server name (SNI) for SolanaCDN control-plane connections"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_control_tls_ca_cert_path")
+            .long("solanacdn-control-tls-ca-cert-path")
+            .value_name("FILE")
+            .takes_value(true)
+            .requires("solanacdn_control")
+            .help("CA bundle (PEM) for SolanaCDN control-plane TLS verification"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_control_tls_insecure_skip_verify")
+            .long("solanacdn-control-tls-insecure-skip-verify")
+            .takes_value(false)
+            .requires("solanacdn_control")
+            .help("Skip SolanaCDN control-plane TLS certificate verification (dev only)"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_control_refresh_ms")
+            .long("solanacdn-control-refresh-ms")
+            .value_name("MILLISECONDS")
+            .takes_value(true)
+            .validator(is_parsable::<u64>)
+            .requires("solanacdn_control")
+            .help("Control-plane POP discovery refresh interval (ms)"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_api_base")
+            .long("solanacdn-api-base")
+            .value_name("URL")
+            .takes_value(true)
+            .help("Pipe API base URL for SolanaCDN session tokens (default: https://api.pipedev.network; env: SOLANACDN_AGENT_API_BASE / PIPE_API_BASE)"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_api_token")
+            .long("solanacdn-api-token")
+            .value_name("TOKEN")
+            .takes_value(true)
+            .help("Pipe API token for SolanaCDN POP sessions (env: SOLANACDN_AGENT_API_TOKEN / PIPE_API_KEY)"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_api_timeout_ms")
+            .long("solanacdn-api-timeout-ms")
+            .value_name("MILLISECONDS")
+            .takes_value(true)
+            .validator(is_parsable::<u64>)
+            .default_value("2000")
+            .help("Pipe API HTTP timeout (ms) for session token refresh"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_api_tls_ca_cert_path")
+            .long("solanacdn-api-tls-ca-cert-path")
+            .value_name("FILE")
+            .takes_value(true)
+            .help("CA bundle (PEM) for Pipe API TLS verification"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_api_tls_insecure_skip_verify")
+            .long("solanacdn-api-tls-insecure-skip-verify")
+            .takes_value(false)
+            .help("Skip Pipe API TLS certificate verification (dev only)"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_api_tls_bootstrap")
+            .long("solanacdn-api-tls-bootstrap")
+            .takes_value(false)
+            .help("Allow POP TLS CA bootstrap via the Pipe API (opt-in)"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_udp")
+            .long("solanacdn-udp")
+            .value_name("MODE")
+            .takes_value(true)
+            .possible_values(&["off", "auto", "always"])
+            .default_value("auto")
+            .help("SolanaCDN UDP data plane mode: off|auto|always"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_no_shreds")
+            .long("solanacdn-no-shreds")
+            .takes_value(false)
+            .help("Disable SolanaCDN shred publishing"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_only_accepted_shreds")
+            .long("solanacdn-only-accepted-shreds")
+            .takes_value(false)
+            .help("Publish only shreds that pass Agave discard checks (default: publish all shreds)"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_only")
+            .long("solanacdn-only")
+            .takes_value(false)
+            .help("When SolanaCDN is connected, ingest only shreds sourced from SolanaCDN (fallback to P2P when disconnected)"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_hybrid")
+            .long("solanacdn-hybrid")
+            .takes_value(false)
+            .conflicts_with("solanacdn_only")
+            .help("Prefer SolanaCDN shreds when healthy, but fall back to P2P if SolanaCDN stalls while connected"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_hybrid_stale_ms")
+            .long("solanacdn-hybrid-stale-ms")
+            .value_name("MILLISECONDS")
+            .takes_value(true)
+            .validator(is_parsable::<u64>)
+            .requires("solanacdn_hybrid")
+            .help("Stall threshold (ms) for --solanacdn-hybrid fallback (default: 2000)"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_race")
+            .long("solanacdn-race")
+            .takes_value(true)
+            .min_values(0)
+            .max_values(1)
+            .possible_values(&["true", "false", "1", "0"])
+            .case_insensitive(true)
+            .help("Enable shred “race” metrics between SolanaCDN and gossip (default: enabled; disable with --solanacdn-race=false). Does not change shred ingest mode."),
+    )
+    .arg(
+        Arg::with_name("solanacdn_race_sample_bits")
+            .long("solanacdn-race-sample-bits")
+            .value_name("BITS")
+            .takes_value(true)
+            .validator(is_parsable::<u8>)
+            .help("Deterministic sampling bits for race metrics (track 1/(2^BITS) shreds; 0=all; default: 12)"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_race_window_ms")
+            .long("solanacdn-race-window-ms")
+            .value_name("MILLISECONDS")
+            .takes_value(true)
+            .validator(is_parsable::<u64>)
+            .help("Race matching window (ms) to wait for the other source (default: 5000)"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_metrics_addr")
+            .long("solanacdn-metrics-addr")
+            .value_name("HOST:PORT")
+            .takes_value(true)
+            .validator(|value| validate_solanacdn_socket_addr(value, "--solanacdn-metrics-addr"))
+            .help("Expose SolanaCDN Prometheus metrics at http://HOST:PORT/metrics and JSON status at /solanacdn/status (recommended: 127.0.0.1:9100)"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_no_subscribe")
+            .long("solanacdn-no-subscribe")
+            .takes_value(false)
+            .help("Disable SolanaCDN shred subscription"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_no_inject")
+            .long("solanacdn-no-inject")
+            .takes_value(false)
+            .help("Disable injecting SolanaCDN shreds into local TVU/gossip"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_no_repair")
+            .long("solanacdn-no-repair")
+            .takes_value(false)
+            .help("Disable repair shreds (risk: may stall if SolanaCDN misses shreds)"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_no_direct_shreds")
+            .long("solanacdn-no-direct-shreds")
+            .takes_value(false)
+            .help("Disable POP direct shred injection (always reinject via PushShredBatch)"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_no_vote_tunnel")
+            .long("solanacdn-no-vote-tunnel")
+            .takes_value(false)
+            .help("Disable vote tunneling via SolanaCDN POP mesh (UDP votes only)"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_vote_dedup_ttl_ms")
+            .long("solanacdn-vote-dedup-ttl-ms")
+            .value_name("MILLISECONDS")
+            .takes_value(true)
+            .validator(is_parsable::<u64>)
+            .help("Deduplicate POP vote-tunnel datagrams for this TTL (ms); 0 disables (default: 2000)"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_vote_dedup_max_entries")
+            .long("solanacdn-vote-dedup-max-entries")
+            .value_name("COUNT")
+            .takes_value(true)
+            .validator(is_parsable::<usize>)
+            .help("Max in-memory entries for vote-tunnel dedup; 0 disables (default: 200000)"),
     )
     .args(&pub_sub_config::args(/*test_validator:*/ false))
     .args(&json_rpc_config::args())

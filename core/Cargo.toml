@@ -65,6 +65,7 @@ chrono = { workspace = true, features = ["default", "serde"] }
 crossbeam-channel = { workspace = true }
 dashmap = { workspace = true, features = ["rayon", "raw-api"] }
 derive_more = { workspace = true }
+ed25519-dalek-v2 = { package = "ed25519-dalek", version = "2.1.1", features = ["rand_core", "serde"] }
 futures = { workspace = true }
 histogram = { workspace = true }
 itertools = { workspace = true }
@@ -76,20 +77,24 @@ lru = { workspace = true }
 min-max-heap = { workspace = true }
 num_cpus = { workspace = true }
 num_enum = { workspace = true }
-prio-graph = { workspace = true }
-prost = { workspace = true }
-prost-types = { workspace = true }
-qualifier_attr = { workspace = true }
-quinn = { workspace = true }
-rand = { workspace = true }
-rand_chacha = { workspace = true }
-rayon = { workspace = true }
-rolling-file = { workspace = true }
-rustls = { workspace = true }
-serde = { workspace = true }
-serde_bytes = { workspace = true }
-slab = { workspace = true }
-smallvec = { workspace = true }
+	prio-graph = { workspace = true }
+	prost = { workspace = true }
+	prost-types = { workspace = true }
+	qualifier_attr = { workspace = true }
+	quinn = { workspace = true }
+	rand = { workspace = true }
+	rand_chacha = { workspace = true }
+	rayon = { workspace = true }
+	reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+	rolling-file = { workspace = true }
+	rustls = { workspace = true }
+	rustls-native-certs = "0.8.1"
+	serde = { workspace = true }
+	serde_bytes = { workspace = true }
+	serde_json = { workspace = true }
+	slab = { workspace = true }
+	smallvec = { workspace = true }
+	solanacdn-protocol = { git = "https://github.com/pipenetwork/solanacdn-protocol", tag = "v0.1.6" }
 solana-account = { workspace = true }
 solana-accounts-db = { workspace = true }
 solana-address-lookup-table-interface = { workspace = true }
@@ -185,13 +190,15 @@ static_assertions = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 strum_macros = { workspace = true }
 sys-info = { workspace = true }
-tempfile = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
-tokio-stream = { workspace = true }
-tokio-util = { workspace = true }
-tonic = { workspace = true }
-trees = { workspace = true }
+	tempfile = { workspace = true }
+	thiserror = { workspace = true }
+	tokio = { workspace = true, features = ["full"] }
+	tokio-rustls = "0.26.2"
+	tokio-stream = { workspace = true }
+	tokio-util = { workspace = true }
+	tonic = { workspace = true }
+	trees = { workspace = true }
+	webpki-roots = "1.0.0"
 
 [target.'cfg(not(any(target_env = "msvc", target_os = "freebsd")))'.dependencies]
 jemallocator = { workspace = true }

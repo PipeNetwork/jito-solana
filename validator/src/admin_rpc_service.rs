@@ -20,6 +20,7 @@ use {
             relayer_stage::{RelayerConfig, RelayerStage},
         },
         repair::repair_service,
+        solanacdn,
         validator::{
             BlockProductionMethod, SchedulerPacing, TransactionStructure, ValidatorStartProgress,
         },
@@ -202,6 +203,10 @@ pub trait AdminRpc {
 
     #[rpc(meta, name = "startProgress")]
     fn start_progress(&self, meta: Self::Metadata) -> Result<ValidatorStartProgress>;
+
+    #[rpc(meta, name = "solanaCdnStatus")]
+    fn solana_cdn_status(&self, meta: Self::Metadata)
+        -> Result<Option<solanacdn::SolanaCdnStatus>>;
 
     #[rpc(meta, name = "addAuthorizedVoter")]
     fn add_authorized_voter(&self, meta: Self::Metadata, keypair_file: String) -> Result<()>;
@@ -513,6 +518,14 @@ impl AdminRpc for AdminRpcImpl {
     fn start_progress(&self, meta: Self::Metadata) -> Result<ValidatorStartProgress> {
         debug!("start_progress admin rpc request received");
         Ok(*meta.start_progress.read().unwrap())
+    }
+
+    fn solana_cdn_status(
+        &self,
+        _meta: Self::Metadata,
+    ) -> Result<Option<solanacdn::SolanaCdnStatus>> {
+        debug!("solana_cdn_status admin rpc request received");
+        Ok(solanacdn::global().map(|h| h.status_snapshot()))
     }
 
     fn add_authorized_voter(&self, meta: Self::Metadata, keypair_file: String) -> Result<()> {

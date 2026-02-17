@@ -160,7 +160,7 @@ use {
     std::{
         borrow::Cow,
         collections::{HashMap, HashSet},
-        net::{IpAddr, SocketAddr},
+        net::{IpAddr, Ipv4Addr, SocketAddr},
         num::{NonZeroU64, NonZeroUsize},
         path::{Path, PathBuf},
         str::FromStr,
@@ -388,6 +388,7 @@ pub struct ValidatorConfig {
     pub use_tpu_client_next: bool,
     pub retransmit_xdp: Option<XdpConfig>,
     pub repair_handler_type: RepairHandlerType,
+    pub solanacdn: Option<crate::solanacdn::SolanaCdnConfig>,
     // jito configuration
     pub relayer_config: Arc<Mutex<RelayerConfig>>,
     pub block_engine_config: Arc<Mutex<BlockEngineConfig>>,
@@ -477,6 +478,7 @@ impl ValidatorConfig {
             use_tpu_client_next: true,
             retransmit_xdp: None,
             repair_handler_type: RepairHandlerType::default(),
+            solanacdn: None,
             relayer_config: Arc::new(Mutex::new(RelayerConfig::default())),
             block_engine_config: Arc::new(Mutex::new(BlockEngineConfig::default())),
             shred_receiver_address: Arc::new(ArcSwap::from_pointee(None)),
@@ -737,6 +739,45 @@ impl Validator {
         let mut bank_notification_senders = Vec::new();
 
         let exit = Arc::new(AtomicBool::new(false));
+
+        if let Some(solanacdn_cfg) = config.solanacdn.as_ref().cloned() {
+            let tpu_port = node
+                .sockets
+                .tpu
+                .first()
+                .ok_or_else(|| anyhow!("missing TPU socket"))?
+                .local_addr()
+                .context("failed to read TPU socket addr")?
+                .port();
+            let tvu_port = node
+                .sockets
+                .tvu
+                .first()
+                .ok_or_else(|| anyhow!("missing TVU socket"))?
+                .local_addr()
+                .context("failed to read TVU socket addr")?
+                .port();
+            let gossip_port = node
+                .sockets
+                .gossip
+                .first()
+                .ok_or_else(|| anyhow!("missing gossip socket"))?
+                .local_addr()
+                .context("failed to read gossip socket addr")?
+                .port();
+            let inject_tpu = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), tpu_port);
+            let inject_tvu = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), tvu_port);
+            let inject_gossip = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), gossip_port);
+            crate::solanacdn::init(
+                solanacdn_cfg,
+                identity_keypair.clone(),
+                exit.clone(),
+                vote_use_quic,
+                inject_tpu,
+                inject_tvu,
+                inject_gossip,
+            );
+        }
 
         let geyser_plugin_config_files = config
             .on_start_geyser_plugin_config_files

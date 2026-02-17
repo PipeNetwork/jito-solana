@@ -5,8 +5,9 @@ use {
         next_leader::upcoming_leader_tpu_vote_sockets,
     },
     bincode::serialize,
+    bytes::Bytes,
     crossbeam_channel::Receiver,
-    solana_client::connection_cache::ConnectionCache,
+    solana_client::connection_cache::{ConnectionCache, Protocol},
     solana_clock::{Slot, FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET},
     solana_connection_cache::client_connection::ClientConnection,
     solana_gossip::{cluster_info::ClusterInfo, epoch_specs::EpochSpecs},
@@ -54,9 +55,9 @@ enum SendVoteError {
     TransportError(#[from] TransportError),
 }
 
-fn send_vote_transaction(
+fn send_vote_bytes(
     cluster_info: &ClusterInfo,
-    transaction: &Transaction,
+    buf: Arc<Vec<u8>>,
     tpu: Option<SocketAddr>,
     connection_cache: &Arc<ConnectionCache>,
 ) -> Result<(), SendVoteError> {
@@ -67,7 +68,6 @@ fn send_vote_transaction(
                 .tpu(connection_cache.protocol())
         })
         .ok_or(SendVoteError::InvalidTpuAddress)?;
-    let buf = Arc::new(serialize(transaction)?);
     let client = connection_cache.get_connection(&tpu);
 
     client.send_data_async(buf).map_err(|err| {
@@ -167,18 +167,39 @@ impl VotingService {
             connection_cache.protocol(),
         );
 
+        let vote_bytes = match serialize(vote_op.tx()) {
+            Ok(v) => Arc::new(v),
+            Err(err) => {
+                error!("failed to serialize vote transaction: {err:?}");
+                return;
+            }
+        };
+
         if !upcoming_leader_sockets.is_empty() {
+            let solanacdn = crate::solanacdn::global();
+            let use_solanacdn = solanacdn.as_ref().is_some_and(|h| h.vote_tunnel_enabled())
+                && matches!(connection_cache.protocol(), Protocol::UDP);
+
             for tpu_vote_socket in upcoming_leader_sockets {
-                let _ = send_vote_transaction(
+                if use_solanacdn {
+                    if let Some(handle) = solanacdn.as_ref() {
+                        if handle.is_connected() {
+                            let payload = Bytes::copy_from_slice(vote_bytes.as_ref());
+                            let _ = handle.try_publish_vote_datagram(tpu_vote_socket, payload);
+                        }
+                    }
+                }
+
+                let _ = send_vote_bytes(
                     cluster_info,
-                    vote_op.tx(),
+                    vote_bytes.clone(),
                     Some(tpu_vote_socket),
                     &connection_cache,
                 );
             }
         } else {
             // Send to our own tpu vote socket if we cannot find a leader to send to
-            let _ = send_vote_transaction(cluster_info, vote_op.tx(), None, &connection_cache);
+            let _ = send_vote_bytes(cluster_info, vote_bytes, None, &connection_cache);
         }
 
         match vote_op {
