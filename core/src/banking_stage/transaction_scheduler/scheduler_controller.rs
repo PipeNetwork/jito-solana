@@ -121,6 +121,35 @@ where
         }
     }
 
+    pub fn new_with_metrics_id(
+        id: String,
+        exit: Arc<AtomicBool>,
+        config: SchedulerConfig,
+        decision_maker: DecisionMaker,
+        receive_and_buffer: R,
+        bank_forks: Arc<RwLock<BankForks>>,
+        scheduler: S,
+        worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
+        bam_controller: bool,
+        bam_enabled: Arc<AtomicU8>,
+    ) -> Self {
+        Self {
+            exit,
+            config,
+            decision_maker,
+            receive_and_buffer,
+            bank_forks,
+            container: R::Container::with_capacity(TOTAL_BUFFERED_PACKETS),
+            scheduler,
+            count_metrics: SchedulerCountMetrics::new(id.clone()),
+            timing_metrics: SchedulerTimingMetrics::new(id.clone()),
+            worker_metrics,
+            scheduling_details: SchedulingDetails::new(id.clone()),
+            bam_controller,
+            bam_enabled,
+        }
+    }
+
     pub fn run(mut self) -> Result<(), SchedulerError> {
         let mut most_recent_leader_slot = None;
         let mut cost_pacer = None;
