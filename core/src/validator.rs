@@ -370,7 +370,6 @@ pub struct ValidatorConfig {
     pub wait_to_vote_slot: Option<Slot>,
     pub runtime_config: RuntimeConfig,
     pub banking_trace_dir_byte_limit: banking_trace::DirByteLimit,
-    pub tx_io_check: Option<String>,
     pub block_verification_method: BlockVerificationMethod,
     pub block_production_method: BlockProductionMethod,
     pub block_production_num_workers: NonZeroUsize,
@@ -398,7 +397,6 @@ pub struct ValidatorConfig {
     pub tip_manager_config: TipManagerConfig,
     pub bam_url: Arc<ArcSwap<Option<String>>>,
     pub solanacdn: Option<crate::solanacdn::SolanaCdnConfig>,
-    pub fast_shreds: Option<solana_turbine::broadcast_stage::FastShredsConfig>,
 }
 
 impl ValidatorConfig {
@@ -458,7 +456,6 @@ impl ValidatorConfig {
             wait_to_vote_slot: None,
             runtime_config: RuntimeConfig::default(),
             banking_trace_dir_byte_limit: 0,
-            tx_io_check: None,
             block_verification_method: BlockVerificationMethod::default(),
             block_production_method: BlockProductionMethod::default(),
             block_production_num_workers: BankingStage::default_num_workers(),
@@ -491,7 +488,6 @@ impl ValidatorConfig {
             tip_manager_config: TipManagerConfig::default(),
             bam_url: Arc::new(ArcSwap::from_pointee(None)),
             solanacdn: None,
-            fast_shreds: None,
         }
     }
 
@@ -1789,7 +1785,6 @@ impl Validator {
             entry_notification_sender,
             blockstore.clone(),
             &config.broadcast_stage_type,
-            config.fast_shreds.clone(),
             xdp_sender,
             exit.clone(),
             node.info.shred_version(),
