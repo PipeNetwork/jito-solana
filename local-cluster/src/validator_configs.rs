@@ -89,6 +89,8 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
         tip_manager_config: config.tip_manager_config.clone(),
         bam_url: config.bam_url.clone(),
         disable_multicast_shred_check: config.disable_multicast_shred_check,
+        solanacdn: config.solanacdn.clone(),
+        fast_shreds: config.fast_shreds.clone(),
     }
 }
 
