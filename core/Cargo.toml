@@ -94,7 +94,7 @@ num_enum = { workspace = true }
 	serde_json = { workspace = true }
 	slab = { workspace = true }
 	smallvec = { workspace = true }
-	solanacdn-protocol = { git = "https://github.com/pipenetwork/solanacdn-protocol", tag = "v0.1.6" }
+solanacdn-protocol = { git = "https://github.com/PipeNetwork/solanacdn-protocol", rev = "a2440e5f2b088e82faa63e70a3d94818c18ba806" }
 solana-account = { workspace = true }
 solana-accounts-db = { workspace = true }
 solana-address-lookup-table-interface = { workspace = true }

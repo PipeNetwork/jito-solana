@@ -44,6 +44,10 @@ If you have a Pipe API key, you can enable SolanaCDN without specifying POP endp
   - (optional) `--solanacdn-hybrid` to prefer SolanaCDN shreds when healthy, but fall back to P2P if SolanaCDN stalls while connected (`--solanacdn-hybrid-stale-ms` controls the stall threshold)
 
 The validator verifies the API key via `POST /v1/solanacdn-agent/verify` and uses the returned POP list.
+The validator will also periodically re-run verify (and after publisher failover / when disconnected
+from all POPs) to refresh assignments:
+
+- `--solanacdn-api-verify-refresh-ms` (set `0` to disable).
 
 ## Enable (explicit POP list / private CA)
 
@@ -52,6 +56,8 @@ If you self-host POPs (or want to point at a specific POP directly), configure:
 - `--solanacdn-pop <IP:PORT>` (repeatable)
 - `--solanacdn-server-name <SNI>` (must match the POP certificate SAN)
 - `--solanacdn-tls-ca-cert-path <FILE>` if using a private CA
+- `--solanacdn-pop-pubkey-pinning warn` (default): log mismatch, continue
+- `--solanacdn-pop-pubkey-pinning enforce`: treat mismatch as fatal and disconnect
 
 Dev-only escape hatch:
 
@@ -74,6 +80,7 @@ Dev-only escape hatch:
 ## Observability
 
 - Metrics + status: `--solanacdn-metrics-addr HOST:PORT` exposes Prometheus at `/metrics` and JSON status at `/solanacdn/status`.
+- Optional auth: `--solanacdn-metrics-auth-token TOKEN` (or env `SOLANACDN_METRICS_TOKEN`) requires `Authorization: Bearer TOKEN` or `?token=TOKEN`.
 - Admin RPC: `solanaCdnStatus` returns the same `SolanaCdnStatus` JSON.
 - In `--solanacdn-hybrid` mode, `tvu_shred_stale` / `tvu_shred_stale_for_ms` reflect time since the last shred accepted into the validator pipeline (compare with `last_shred_*` to diagnose delivery vs discard).
 - Race metrics (SolanaCDN vs gossip): enabled by default; disable with `--solanacdn-race=false`. Tune via `--solanacdn-race-sample-bits` and `--solanacdn-race-window-ms` (compatible with `--solanacdn-only` / `--solanacdn-hybrid`; does not change shred ingest mode).

@@ -1510,6 +1510,15 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .help("TLS server name (SNI) for SolanaCDN POP QUIC connections"),
     )
     .arg(
+        Arg::with_name("solanacdn_pop_pubkey_pinning")
+            .long("solanacdn-pop-pubkey-pinning")
+            .value_name("MODE")
+            .takes_value(true)
+            .possible_values(&["off", "warn", "enforce"])
+            .default_value("warn")
+            .help("When Pipe API POP discovery provides POP pubkeys, validate the connected POP pubkey during auth: off|warn|enforce"),
+    )
+    .arg(
         Arg::with_name("solanacdn_tls_ca_cert_path")
             .long("solanacdn-tls-ca-cert-path")
             .value_name("FILE")
@@ -1576,6 +1585,15 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .validator(is_parsable::<u64>)
             .default_value("2000")
             .help("Pipe API HTTP timeout (ms) for session token refresh"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_api_verify_refresh_ms")
+            .long("solanacdn-api-verify-refresh-ms")
+            .value_name("MILLISECONDS")
+            .takes_value(true)
+            .validator(is_parsable::<u64>)
+            .default_value("3600000")
+            .help("Pipe API POP discovery refresh interval (ms) via /v1/solanacdn-agent/verify (0 disables)"),
     )
     .arg(
         Arg::with_name("solanacdn_api_tls_ca_cert_path")
@@ -1672,6 +1690,13 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .takes_value(true)
             .validator(|value| validate_solanacdn_socket_addr(value, "--solanacdn-metrics-addr"))
             .help("Expose SolanaCDN Prometheus metrics at http://HOST:PORT/metrics and JSON status at /solanacdn/status (recommended: 127.0.0.1:9100)"),
+    )
+    .arg(
+        Arg::with_name("solanacdn_metrics_auth_token")
+            .long("solanacdn-metrics-auth-token")
+            .value_name("TOKEN")
+            .takes_value(true)
+            .help("Require a token for SolanaCDN metrics/status endpoints (Authorization: Bearer TOKEN or ?token=TOKEN)"),
     )
     .arg(
         Arg::with_name("solanacdn_no_subscribe")

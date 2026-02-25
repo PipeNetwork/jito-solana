@@ -21,10 +21,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Semaphore};
 
 use solana_keypair::Keypair;
 use solana_ledger::shred::ShredId as LedgerShredId;
+use solana_pubkey::Pubkey;
 use solana_sha256_hasher as sha256_hasher;
 use solana_signer::Signer;
 
@@ -50,12 +51,29 @@ const DEFAULT_VOTE_DEDUP_TTL_MS: u64 = 2_000;
 const DEFAULT_VOTE_DEDUP_MAX_ENTRIES: usize = 200_000;
 const POP_EGRESS_IP_TTL_MS: u64 = 10 * 60_000;
 const POP_EGRESS_IP_MAX_ENTRIES: usize = 50_000;
+const PIPE_API_VERIFY_MAX_POP_ENDPOINTS: usize = 32;
+const CTRL_MAX_FRAME_BYTES: usize = 1 * 1024 * 1024;
+const SHREDS_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
+const VOTES_MAX_FRAME_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DataPlaneMode {
     Off,
     Auto,
     Always,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PopPubkeyPinningMode {
+    Off,
+    Warn,
+    Enforce,
+}
+
+impl Default for PopPubkeyPinningMode {
+    fn default() -> Self {
+        Self::Warn
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,18 +107,29 @@ pub struct SolanaCdnConfig {
     pub server_name: String,
     pub tls_insecure_skip_verify: bool,
     pub tls_ca_cert_path: Option<PathBuf>,
+    /// If Pipe-managed discovery returns a POP pubkey for a given endpoint, optionally enforce that
+    /// the connected POP presents the expected pubkey during auth.
+    pub pop_pubkey_pinning: PopPubkeyPinningMode,
 
     pub udp_mode: DataPlaneMode,
 
     pub pipe_api_base_url: String,
     pub pipe_api_token: Option<String>,
     pub pipe_api_timeout_ms: u64,
+    /// How often (ms) to re-run Pipe API verify to refresh the assigned POP list.
+    ///
+    /// Notes:
+    /// - This performs `POST /v1/solanacdn-agent/verify`, which may create a new "run" on the server.
+    /// - Set to 0 to disable periodic verify refreshes (failover-triggered refreshes may still run).
+    pub pipe_api_verify_refresh_ms: u64,
     pub pipe_api_tls_insecure_skip_verify: bool,
     pub pipe_api_tls_ca_cert_path: Option<PathBuf>,
     pub pipe_api_tls_bootstrap: bool,
 
     /// Optional Prometheus/HTTP status listener for SolanaCDN integration.
     pub metrics_listen_addr: Option<SocketAddr>,
+    /// Optional auth token required for metrics/status endpoints.
+    pub metrics_auth_token: Option<String>,
 
     /// If enabled, measure “race” outcomes between SolanaCDN-delivered shreds and gossip shreds.
     /// This requires ingesting shreds from both paths (do not use `--solanacdn-only`/hybrid).
@@ -144,14 +173,17 @@ impl SolanaCdnConfig {
             server_name: "solanacdn-pop".to_string(),
             tls_insecure_skip_verify: false,
             tls_ca_cert_path: None,
+            pop_pubkey_pinning: PopPubkeyPinningMode::Warn,
             udp_mode: DataPlaneMode::Auto,
             pipe_api_base_url: "https://api.pipedev.network".to_string(),
             pipe_api_token: None,
             pipe_api_timeout_ms: 2_000,
+            pipe_api_verify_refresh_ms: 3_600_000,
             pipe_api_tls_insecure_skip_verify: false,
             pipe_api_tls_ca_cert_path: None,
             pipe_api_tls_bootstrap: false,
             metrics_listen_addr: None,
+            metrics_auth_token: None,
             race_enabled: true,
             race_sample_bits: 12,
             race_window_ms: 5_000,
@@ -184,14 +216,17 @@ impl Default for SolanaCdnConfig {
             server_name: "solanacdn-pop".to_string(),
             tls_insecure_skip_verify: false,
             tls_ca_cert_path: None,
+            pop_pubkey_pinning: PopPubkeyPinningMode::Warn,
             udp_mode: DataPlaneMode::Auto,
             pipe_api_base_url: "https://api.pipedev.network".to_string(),
             pipe_api_token: None,
             pipe_api_timeout_ms: 2_000,
+            pipe_api_verify_refresh_ms: 3_600_000,
             pipe_api_tls_insecure_skip_verify: false,
             pipe_api_tls_ca_cert_path: None,
             pipe_api_tls_bootstrap: false,
             metrics_listen_addr: None,
+            metrics_auth_token: None,
             race_enabled: true,
             race_sample_bits: 12,
             race_window_ms: 5_000,
@@ -764,6 +799,7 @@ pub struct SolanaCdnHandle {
     dropped_vote_datagrams: AtomicU64,
     uplink_broadcast_lagged: AtomicU64,
     pop_endpoint_ips: DashSet<IpAddr>,
+    pipe_pop_expected_pubkeys: DashMap<SocketAddr, PubkeyBytes>,
     pop_egress_ips: DashMap<IpAddr, u64>,
     connected_pops: DashSet<SocketAddr>,
     publisher_endpoint: ArcSwapOption<String>,
@@ -804,6 +840,7 @@ impl SolanaCdnHandle {
             dropped_vote_datagrams: AtomicU64::new(0),
             uplink_broadcast_lagged: AtomicU64::new(0),
             pop_endpoint_ips: DashSet::new(),
+            pipe_pop_expected_pubkeys: DashMap::new(),
             pop_egress_ips: DashMap::new(),
             connected_pops: DashSet::new(),
             publisher_endpoint: ArcSwapOption::const_empty(),
@@ -862,6 +899,10 @@ impl SolanaCdnHandle {
 
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Relaxed)
+    }
+
+    fn metrics_auth_token(&self) -> Option<&str> {
+        self.cfg.metrics_auth_token.as_deref()
     }
 
     pub fn publish_shreds_enabled(&self) -> bool {
@@ -1104,6 +1145,17 @@ impl SolanaCdnHandle {
         for ep in endpoints {
             self.pop_endpoint_ips.insert(ep.ip());
         }
+    }
+
+    fn note_pipe_pop_expected_pubkeys(&self, expected: &HashMap<SocketAddr, PubkeyBytes>) {
+        self.pipe_pop_expected_pubkeys.clear();
+        for (ep, pk) in expected {
+            self.pipe_pop_expected_pubkeys.insert(*ep, *pk);
+        }
+    }
+
+    fn expected_pipe_pop_pubkey(&self, endpoint: SocketAddr) -> Option<PubkeyBytes> {
+        self.pipe_pop_expected_pubkeys.get(&endpoint).map(|v| *v)
     }
 
     pub fn note_pop_endpoint(&self, endpoint: SocketAddr) {
@@ -1506,11 +1558,13 @@ pub fn global() -> Option<Arc<SolanaCdnHandle>> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn set_global_for_tests(handle: Option<Arc<SolanaCdnHandle>>) {
     GLOBAL.store(handle);
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn new_handle_for_tests(cfg: SolanaCdnConfig) -> Arc<SolanaCdnHandle> {
     Arc::new(SolanaCdnHandle::new(cfg))
 }
@@ -1802,6 +1856,18 @@ fn sha256_bytes(data: &[u8]) -> [u8; 32] {
     out
 }
 
+fn pop_assign_score(seed: &str, key: &str) -> u64 {
+    let digest = sha256_hasher::hashv(&[
+        b"solanacdn_pop_assign_v1|",
+        seed.as_bytes(),
+        b"|",
+        key.as_bytes(),
+    ]);
+    let mut head = [0u8; 8];
+    head.copy_from_slice(&digest.as_ref()[..8]);
+    u64::from_be_bytes(head)
+}
+
 #[derive(Debug, Deserialize)]
 struct PipeApiSolanaCdnTlsResponse {
     ok: bool,
@@ -2006,6 +2072,17 @@ struct PipeApiVerifyResponse {
     /// POP endpoints for the agent to connect to (provided by control plane).
     #[serde(default)]
     pop_endpoints: Vec<String>,
+    /// POP endpoints with metadata (preferred; additive field).
+    #[serde(default)]
+    pop_endpoints_v2: Vec<PipeApiPopEndpointV2>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct PipeApiPopEndpointV2 {
+    id: String,
+    quic_endpoint: String,
+    #[serde(default)]
+    node_pubkey: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -2024,6 +2101,7 @@ struct PipeApiVerifyResult {
     heartbeat_schema_version: u32,
     ingest: PipeApiIngestConfig,
     pop_endpoints: Vec<SocketAddr>,
+    pop_expected_pubkeys: HashMap<SocketAddr, PubkeyBytes>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2121,19 +2199,104 @@ async fn pipe_api_verify(
         )));
     }
 
-    let mut pop_endpoints: Vec<SocketAddr> = parsed
-        .pop_endpoints
-        .iter()
-        .filter_map(|s| match s.parse::<SocketAddr>() {
-            Ok(addr) => Some(addr),
-            Err(e) => {
-                warn!("solanacdn: ignoring invalid pop_endpoint from Pipe API verify ({s}): {e}");
-                None
+    let mut pop_expected_pubkeys: HashMap<SocketAddr, PubkeyBytes> = HashMap::new();
+
+    let mut pop_endpoints: Vec<SocketAddr> = Vec::new();
+    if !parsed.pop_endpoints_v2.is_empty() {
+        use std::str::FromStr;
+
+        let mut candidates: HashMap<SocketAddr, (String, Option<PubkeyBytes>)> = HashMap::new();
+        for pop in parsed.pop_endpoints_v2.iter() {
+            let addr = match pop.quic_endpoint.parse::<SocketAddr>() {
+                Ok(a) => a,
+                Err(e) => {
+                    warn!(
+                        "solanacdn: ignoring invalid pop_endpoint from Pipe API verify v2 ({}): {e}",
+                        pop.quic_endpoint
+                    );
+                    continue;
+                }
+            };
+            let expected_pubkey = match pop
+                .node_pubkey
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(b58) => match Pubkey::from_str(b58) {
+                    Ok(pk) => Some(PubkeyBytes(pk.to_bytes())),
+                    Err(e) => {
+                        warn!(
+                            "solanacdn: ignoring invalid pop node_pubkey from Pipe API verify v2 ({b58}): {e}"
+                        );
+                        None
+                    }
+                },
+                None => None,
+            };
+
+            match candidates.entry(addr) {
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert((pop.id.clone(), expected_pubkey));
+                }
+                std::collections::hash_map::Entry::Occupied(mut o) => {
+                    if o.get().1.is_none() && expected_pubkey.is_some() {
+                        o.insert((pop.id.clone(), expected_pubkey));
+                    }
+                }
             }
-        })
-        .collect();
+        }
+
+        let mut scored: Vec<(u64, SocketAddr, String, Option<PubkeyBytes>)> = candidates
+            .into_iter()
+            .map(|(addr, (id, pk))| (pop_assign_score(&req.validator_pubkey, &id), addr, id, pk))
+            .collect();
+        scored.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| a.1.cmp(&b.1))
+        });
+        if scored.len() > PIPE_API_VERIFY_MAX_POP_ENDPOINTS {
+            scored.truncate(PIPE_API_VERIFY_MAX_POP_ENDPOINTS);
+        }
+
+        for (_score, addr, _id, pk) in scored {
+            pop_endpoints.push(addr);
+            if let Some(pk) = pk {
+                pop_expected_pubkeys.insert(addr, pk);
+            }
+        }
+    }
+
+    if pop_endpoints.is_empty() {
+        let mut candidates: Vec<(String, SocketAddr)> = Vec::new();
+        for s in parsed.pop_endpoints.iter() {
+            match s.parse::<SocketAddr>() {
+                Ok(addr) => candidates.push((s.trim().to_string(), addr)),
+                Err(e) => {
+                    warn!(
+                        "solanacdn: ignoring invalid pop_endpoint from Pipe API verify ({s}): {e}"
+                    );
+                }
+            }
+        }
+
+        candidates.sort_by(|(a_raw, a_addr), (b_raw, b_addr)| {
+            let sa = pop_assign_score(&req.validator_pubkey, a_raw);
+            let sb = pop_assign_score(&req.validator_pubkey, b_raw);
+            sb.cmp(&sa)
+                .then_with(|| a_raw.cmp(b_raw))
+                .then_with(|| a_addr.cmp(b_addr))
+        });
+        if candidates.len() > PIPE_API_VERIFY_MAX_POP_ENDPOINTS {
+            candidates.truncate(PIPE_API_VERIFY_MAX_POP_ENDPOINTS);
+        }
+        pop_endpoints = candidates.into_iter().map(|(_raw, addr)| addr).collect();
+    }
+
     pop_endpoints.sort();
     pop_endpoints.dedup();
+    pop_expected_pubkeys.retain(|ep, _| pop_endpoints.binary_search(ep).is_ok());
 
     Ok(PipeApiVerifyResult {
         agent_id: parsed.agent_id,
@@ -2142,6 +2305,7 @@ async fn pipe_api_verify(
         heartbeat_schema_version: parsed.heartbeat_schema_version.unwrap_or(0),
         ingest: parsed.ingest,
         pop_endpoints,
+        pop_expected_pubkeys,
     })
 }
 
@@ -2189,16 +2353,21 @@ struct PipeApiRefresher {
     session_token_rx: watch::Receiver<Option<String>>,
     pop_endpoints_rx: watch::Receiver<Vec<SocketAddr>>,
     verify_rx: watch::Receiver<Option<PipeApiVerifyResult>>,
+    refresh_tx: mpsc::Sender<()>,
 }
 
 fn spawn_pipe_pop_session_token_refresher(
     cfg: PipeApiClientConfig,
     validator_pubkey_base58: String,
     direct_shreds_from_pop: bool,
+    handle: Arc<SolanaCdnHandle>,
+    verify_refresh_ms: u64,
 ) -> PipeApiRefresher {
     let (token_tx, token_rx) = watch::channel::<Option<String>>(None);
     let (pops_tx, pops_rx) = watch::channel::<Vec<SocketAddr>>(Vec::new());
     let (verify_tx, verify_rx) = watch::channel::<Option<PipeApiVerifyResult>>(None);
+    // Trigger channel to request an immediate re-verify (coalesced).
+    let (refresh_tx, mut refresh_rx) = mpsc::channel::<()>(1);
     tokio::spawn(async move {
         let client = match build_pipe_api_http_client(&cfg) {
             Ok(c) => c,
@@ -2223,6 +2392,20 @@ fn spawn_pipe_pop_session_token_refresher(
         let mut current_expires_at: Option<std::time::Instant> = None;
         let mut backoff = Duration::from_secs(1);
 
+        let verify_refresh_ms = verify_refresh_ms.min(86_400_000); // 24h
+        let verify_refresh = if verify_refresh_ms == 0 {
+            None
+        } else {
+            Some(Duration::from_millis(verify_refresh_ms.max(60_000)))
+        };
+        let mut verify_tick = verify_refresh.map(tokio::time::interval);
+        if let Some(t) = verify_tick.as_mut() {
+            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // `tokio::time::interval()` ticks immediately on first poll; consume that tick so we
+            // don't immediately re-run verify in steady-state.
+            t.tick().await;
+        }
+
         loop {
             let verify = match pipe_api_verify(&client, &cfg, &verify_req).await {
                 Ok(v) => {
@@ -2237,6 +2420,7 @@ fn spawn_pipe_pop_session_token_refresher(
                 }
             };
 
+            handle.note_pipe_pop_expected_pubkeys(&verify.pop_expected_pubkeys);
             verify_tx.send_replace(Some(verify.clone()));
 
             if verify.pop_endpoints.is_empty() {
@@ -2259,7 +2443,23 @@ fn spawn_pipe_pop_session_token_refresher(
                             Some(std::time::Instant::now() + Duration::from_secs(expires_in_secs));
 
                         token_tx.send_replace(Some(parsed.session_token));
-                        tokio::time::sleep(Duration::from_secs(refresh_in_secs)).await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(refresh_in_secs)) => {}
+                            _ = async {
+                                if let Some(t) = verify_tick.as_mut() {
+                                    t.tick().await;
+                                } else {
+                                    std::future::pending::<()>().await;
+                                }
+                            } => {
+                                // Periodic refresh: re-run verify to pick up new assigned POPs.
+                                break;
+                            }
+                            Some(()) = refresh_rx.recv() => {
+                                // Failover-triggered refresh.
+                                break;
+                            }
+                        }
                     }
                     Err(e) => {
                         warn!("solanacdn: Pipe API pop session token refresh failed: {e}");
@@ -2268,7 +2468,21 @@ fn spawn_pipe_pop_session_token_refresher(
                             token_tx.send_replace(None);
                         }
 
-                        tokio::time::sleep(backoff).await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(backoff) => {}
+                            _ = async {
+                                if let Some(t) = verify_tick.as_mut() {
+                                    t.tick().await;
+                                } else {
+                                    std::future::pending::<()>().await;
+                                }
+                            } => {
+                                break;
+                            }
+                            Some(()) = refresh_rx.recv() => {
+                                break;
+                            }
+                        }
                         backoff = (backoff * 2).min(Duration::from_secs(30));
                         break;
                     }
@@ -2280,6 +2494,7 @@ fn spawn_pipe_pop_session_token_refresher(
         session_token_rx: token_rx,
         pop_endpoints_rx: pops_rx,
         verify_rx,
+        refresh_tx,
     }
 }
 
@@ -2662,10 +2877,17 @@ async fn write_len_prefixed<W: AsyncWrite + Unpin>(
 async fn read_len_prefixed<R: AsyncRead + Unpin>(
     reader: &mut R,
 ) -> Result<Vec<u8>, SolanaCdnError> {
+    read_len_prefixed_with_limit(reader, DEFAULT_MAX_FRAME_BYTES).await
+}
+
+async fn read_len_prefixed_with_limit<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    max_frame_bytes: usize,
+) -> Result<Vec<u8>, SolanaCdnError> {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
-    if len > DEFAULT_MAX_FRAME_BYTES {
+    if len > max_frame_bytes {
         return Err(SolanaCdnError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "frame too large",
@@ -2684,8 +2906,11 @@ async fn write_agent_msg<W: AsyncWrite + Unpin>(
     write_len_prefixed(writer, &payload).await
 }
 
-async fn read_pop_msg<R: AsyncRead + Unpin>(reader: &mut R) -> Result<PopToAgent, SolanaCdnError> {
-    let bytes = read_len_prefixed(reader).await?;
+async fn read_pop_msg<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    max_frame_bytes: usize,
+) -> Result<PopToAgent, SolanaCdnError> {
+    let bytes = read_len_prefixed_with_limit(reader, max_frame_bytes).await?;
     Ok(decode_envelope(&bytes)?)
 }
 
@@ -2897,9 +3122,61 @@ where
 }
 
 const METRICS_HTTP_MAX_REQUEST_BYTES: usize = 8 * 1024;
+const METRICS_HTTP_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const METRICS_HTTP_MAX_CONNECTIONS: usize = 64;
 
 fn prometheus_escape_label_value(value: &str) -> String {
     value.replace('\\', r"\\").replace('"', r#"\""#)
+}
+
+fn metrics_query_token(path: &str) -> Option<&str> {
+    let (_path, query) = path.split_once('?')?;
+    for pair in query.split('&') {
+        let (k, v) = pair.split_once('=')?;
+        if k == "token" {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn metrics_header_value<'a>(req: &'a str, header: &str) -> Option<&'a str> {
+    for line in req.lines().skip(1) {
+        let line = line.trim();
+        if line.is_empty() {
+            break;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case(header) {
+            return Some(value.trim());
+        }
+    }
+    None
+}
+
+fn metrics_authorized(req: &str, path: &str, expected: &str) -> bool {
+    if let Some(token) = metrics_query_token(path) {
+        if token == expected {
+            return true;
+        }
+    }
+    if let Some(header) = metrics_header_value(req, "authorization") {
+        let token = header
+            .strip_prefix("Bearer ")
+            .or_else(|| header.strip_prefix("bearer "))
+            .unwrap_or(header);
+        if token == expected {
+            return true;
+        }
+    }
+    if let Some(token) = metrics_header_value(req, "x-solanacdn-token") {
+        if token == expected {
+            return true;
+        }
+    }
+    false
 }
 
 fn histogram_quantile_seconds(
@@ -3431,9 +3708,9 @@ async fn handle_metrics_conn(mut stream: TcpStream, handle: Arc<SolanaCdnHandle>
     let mut buf = [0u8; 1024];
     let mut req = Vec::new();
     loop {
-        match stream.read(&mut buf).await {
-            Ok(0) => return,
-            Ok(n) => {
+        match tokio::time::timeout(METRICS_HTTP_READ_TIMEOUT, stream.read(&mut buf)).await {
+            Ok(Ok(0)) => return,
+            Ok(Ok(n)) => {
                 req.extend_from_slice(&buf[..n]);
                 if req.len() > METRICS_HTTP_MAX_REQUEST_BYTES {
                     write_http_response(
@@ -3449,7 +3726,17 @@ async fn handle_metrics_conn(mut stream: TcpStream, handle: Arc<SolanaCdnHandle>
                     break;
                 }
             }
-            Err(_) => return,
+            Ok(Err(_)) => return,
+            Err(_) => {
+                write_http_response(
+                    &mut stream,
+                    "408 Request Timeout",
+                    "text/plain; charset=utf-8",
+                    b"request timeout\n",
+                )
+                .await;
+                return;
+            }
         }
     }
 
@@ -3458,6 +3745,20 @@ async fn handle_metrics_conn(mut stream: TcpStream, handle: Arc<SolanaCdnHandle>
     let mut parts = first.split_whitespace();
     let method = parts.next().unwrap_or_default();
     let path = parts.next().unwrap_or_default();
+    let (path_only, _query) = path.split_once('?').unwrap_or((path, ""));
+
+    if let Some(expected) = handle.metrics_auth_token() {
+        if !metrics_authorized(&req_str, path, expected) {
+            write_http_response(
+                &mut stream,
+                "401 Unauthorized",
+                "text/plain; charset=utf-8",
+                b"unauthorized\n",
+            )
+            .await;
+            return;
+        }
+    }
 
     if method != "GET" {
         write_http_response(
@@ -3470,7 +3771,7 @@ async fn handle_metrics_conn(mut stream: TcpStream, handle: Arc<SolanaCdnHandle>
         return;
     }
 
-    match path {
+    match path_only {
         "/metrics" => {
             let body = format_prometheus_metrics(handle.as_ref());
             write_http_response(
@@ -3512,6 +3813,7 @@ async fn run_metrics_server(
     let listener = TcpListener::bind(listen_addr).await?;
     let bound = listener.local_addr()?;
     info!("solanacdn: metrics listening on http://{bound}/metrics");
+    let semaphore = Arc::new(Semaphore::new(METRICS_HTTP_MAX_CONNECTIONS));
 
     loop {
         if exit.load(Ordering::Relaxed) {
@@ -3525,7 +3827,27 @@ async fn run_metrics_server(
             Ok(v) => v,
             Err(_) => continue,
         };
-        tokio::spawn(handle_metrics_conn(stream, handle.clone()));
+        let permit = match semaphore.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                tokio::spawn(async move {
+                    let mut stream = stream;
+                    write_http_response(
+                        &mut stream,
+                        "503 Service Unavailable",
+                        "text/plain; charset=utf-8",
+                        b"busy\n",
+                    )
+                    .await;
+                });
+                continue;
+            }
+        };
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            handle_metrics_conn(stream, handle).await;
+        });
     }
 }
 
@@ -3605,6 +3927,8 @@ async fn run(
                 },
                 validator_pubkey_base58.clone(),
                 cfg.direct_shreds_from_pop,
+                handle.clone(),
+                cfg.pipe_api_verify_refresh_ms,
             )
         });
 
@@ -3626,6 +3950,7 @@ async fn run(
     let pipe_session_token_rx = pipe_api.as_ref().map(|p| p.session_token_rx.clone());
     let pipe_pop_endpoints_rx = pipe_api.as_ref().map(|p| p.pop_endpoints_rx.clone());
     let pipe_verify_rx = pipe_api.as_ref().map(|p| p.verify_rx.clone());
+    let pipe_refresh_tx = pipe_api.as_ref().map(|p| p.refresh_tx.clone());
 
     if let Some(verify_rx) = pipe_verify_rx {
         let cfg = cfg.clone();
@@ -3661,6 +3986,7 @@ async fn run(
         shred_deduper,
         pipe_session_token_rx,
         pipe_pop_endpoints_rx,
+        pipe_refresh_tx,
         publisher_tx,
         publisher_rx,
         events_tx,
@@ -3685,6 +4011,7 @@ async fn manage_pop_sessions(
     shred_deduper: ShredBatchDeduper,
     pipe_session_token_rx: Option<watch::Receiver<Option<String>>>,
     mut pipe_pop_endpoints_rx: Option<watch::Receiver<Vec<SocketAddr>>>,
+    pipe_refresh_tx: Option<mpsc::Sender<()>>,
     publisher_tx: watch::Sender<Option<SocketAddr>>,
     publisher_rx: watch::Receiver<Option<SocketAddr>>,
     session_events_tx: mpsc::UnboundedSender<SessionEvent>,
@@ -3717,6 +4044,10 @@ async fn manage_pop_sessions(
 
     let mut status_tick = tokio::time::interval(Duration::from_secs(30));
     status_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    // Avoid spamming the API with verify refresh requests on flappy links.
+    let mut last_pipe_refresh_req_at: Option<std::time::Instant> = None;
+    let pipe_refresh_min_interval = Duration::from_secs(30);
 
     // Spawn initial sessions.
     for endpoint in desired.iter().copied() {
@@ -3823,6 +4154,21 @@ async fn manage_pop_sessions(
                         connected.remove(&endpoint);
                         handle.note_disconnected_pop(endpoint);
                         info!("solanacdn: disconnected from POP {endpoint}");
+
+                        // If we just lost our current publisher, ask the Pipe API for a refreshed
+                        // assignment so we can pick up replacements without requiring a restart.
+                        if *publisher_tx.borrow() == Some(endpoint) {
+                            if let Some(tx) = pipe_refresh_tx.as_ref() {
+                                let now = std::time::Instant::now();
+                                let ok = last_pipe_refresh_req_at
+                                    .map(|t| now.duration_since(t) >= pipe_refresh_min_interval)
+                                    .unwrap_or(true);
+                                if ok {
+                                    let _ = tx.try_send(());
+                                    last_pipe_refresh_req_at = Some(now);
+                                }
+                            }
+                        }
                     }
                     SessionEvent::RttSample{endpoint, rtt_ms} => {
                         if let Some(info) = connected.get_mut(&endpoint) {
@@ -3881,6 +4227,23 @@ async fn manage_pop_sessions(
         if *publisher_tx.borrow() != new_publisher {
             info!("solanacdn: selected publisher {:?}", new_publisher);
             let _ = publisher_tx.send(new_publisher);
+        }
+
+        // If we're connected to zero POPs, request a Pipe API refresh (if configured). This helps
+        // discover newly-added POPs and recover from stale assignments without requiring a
+        // validator restart.
+        if new_publisher.is_none() {
+            if let Some(tx) = pipe_refresh_tx.as_ref() {
+                let now = std::time::Instant::now();
+                let ok = last_pipe_refresh_req_at
+                    .map(|t| now.duration_since(t) >= pipe_refresh_min_interval)
+                    .unwrap_or(true);
+                if ok {
+                    // Best-effort (coalesced): if the channel is full, a refresh is already queued.
+                    let _ = tx.try_send(());
+                    last_pipe_refresh_req_at = Some(now);
+                }
+            }
         }
 
         // Update publisher uplink on the global handle.
@@ -4117,7 +4480,7 @@ async fn run_pop_session(
             write_agent_msg(&mut ctrl_send, &AgentToPop::Auth(auth_req)).await?;
         }
     }
-    let auth_ok = match read_pop_msg(&mut ctrl_recv).await? {
+    let auth_ok = match read_pop_msg(&mut ctrl_recv, CTRL_MAX_FRAME_BYTES).await? {
         PopToAgent::AuthOk(ok) => ok,
         PopToAgent::AuthError(err) => {
             if err.message.contains("missing pipe session token") {
@@ -4136,12 +4499,34 @@ async fn run_pop_session(
             )))
         }
     };
+    let pop_pubkey = auth_ok.pop_pubkey;
+
+    if let Some(expected) = handle.expected_pipe_pop_pubkey(endpoint) {
+        if expected != pop_pubkey {
+            let expected_b58 = expected.to_base58();
+            let actual_b58 = pop_pubkey.to_base58();
+            match cfg.pop_pubkey_pinning {
+                PopPubkeyPinningMode::Off => {}
+                PopPubkeyPinningMode::Warn => {
+                    warn!("solanacdn: POP pubkey mismatch for {endpoint}: expected={expected_b58} actual={actual_b58} (continuing)");
+                }
+                PopPubkeyPinningMode::Enforce => {
+                    return Err(SolanaCdnError::AuthFailed(format!(
+                        "POP pubkey mismatch for {endpoint}: expected={expected_b58} actual={actual_b58}"
+                    )));
+                }
+            }
+        }
+    }
 
     // Advertise per-session capabilities so POPs can decide which optional features to use.
     write_agent_msg(
         &mut ctrl_send,
         &AgentToPop::Capabilities(AgentCapabilities {
             tx_fair_ordering: false,
+            tx_fair_fifo_per_origin: false,
+            tx_fair_fifo_per_origin_flow: false,
+            tx_fair_seq_handoff: false,
         }),
     )
     .await?;
@@ -4372,7 +4757,7 @@ async fn run_pop_session(
         let ctrl_out_tx = ctrl_out_tx.clone();
         tokio::spawn(async move {
             loop {
-                let msg = match read_pop_msg(&mut ctrl_recv).await {
+                let msg = match read_pop_msg(&mut ctrl_recv, CTRL_MAX_FRAME_BYTES).await {
                     Ok(v) => v,
                     Err(_) => return,
                 };
@@ -4413,7 +4798,7 @@ async fn run_pop_session(
         let ctrl_out_tx = ctrl_out_tx.clone();
         tokio::spawn(async move {
             loop {
-                let msg = match read_pop_msg(&mut shreds_recv).await {
+                let msg = match read_pop_msg(&mut shreds_recv, SHREDS_MAX_FRAME_BYTES).await {
                     Ok(v) => v,
                     Err(_) => return,
                 };
@@ -4454,7 +4839,7 @@ async fn run_pop_session(
         let ctrl_out_tx = ctrl_out_tx.clone();
         tokio::spawn(async move {
             loop {
-                let msg = match read_pop_msg(&mut votes_recv).await {
+                let msg = match read_pop_msg(&mut votes_recv, VOTES_MAX_FRAME_BYTES).await {
                     Ok(v) => v,
                     Err(_) => return,
                 };
@@ -4909,6 +5294,11 @@ mod tests {
     }
 
     #[test]
+    fn test_pop_assign_score() {
+        assert_eq!(pop_assign_score("seed", "pop-1"), 1892543878090576758u64);
+    }
+
+    #[test]
     fn shred_batch_id_is_stable_and_ordered() {
         let a = (ShredKind::Tvu, Bytes::from_static(b"a"));
         let b = (ShredKind::Tvu, Bytes::from_static(b"b"));
@@ -5186,6 +5576,7 @@ mod tests {
                 &mut ctrl_send,
                 &PopToAgent::AuthOk(AuthOk {
                     pop_id: "test-pop".to_string(),
+                    pop_pubkey: PubkeyBytes([9u8; 32]),
                     server_time_ms: now_ms(),
                     udp_token,
                     udp_shreds_port: pop_udp_shreds_port,
@@ -5344,6 +5735,7 @@ mod tests {
                 &mut ctrl_send,
                 &PopToAgent::AuthOk(AuthOk {
                     pop_id: "test-pop".to_string(),
+                    pop_pubkey: PubkeyBytes([4u8; 32]),
                     server_time_ms: now_ms(),
                     udp_token,
                     udp_shreds_port: pop_udp_shreds_port,
@@ -5527,6 +5919,7 @@ mod tests {
                 &mut ctrl_send,
                 &PopToAgent::AuthOk(AuthOk {
                     pop_id: "test-pop".to_string(),
+                    pop_pubkey: PubkeyBytes([3u8; 32]),
                     server_time_ms: now_ms(),
                     udp_token,
                     udp_shreds_port: pop_udp_shreds_port,
@@ -5690,6 +6083,7 @@ mod tests {
                 &mut ctrl_send,
                 &PopToAgent::AuthOk(AuthOk {
                     pop_id: "test-pop".to_string(),
+                    pop_pubkey: PubkeyBytes([2u8; 32]),
                     server_time_ms: now_ms(),
                     udp_token,
                     udp_shreds_port: pop_udp_shreds_port,
@@ -5858,6 +6252,7 @@ mod tests {
                 &mut ctrl_send,
                 &PopToAgent::AuthOk(AuthOk {
                     pop_id: "test-pop".to_string(),
+                    pop_pubkey: PubkeyBytes([1u8; 32]),
                     server_time_ms: now_ms(),
                     udp_token: random_nonce_16(),
                     udp_shreds_port: 0,

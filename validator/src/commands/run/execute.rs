@@ -555,6 +555,14 @@ pub fn execute(
             if let Some(server_name) = matches.value_of("solanacdn_server_name") {
                 cfg.server_name = server_name.to_string();
             }
+            cfg.pop_pubkey_pinning = match matches
+                .value_of("solanacdn_pop_pubkey_pinning")
+                .unwrap_or("warn")
+            {
+                "off" => solana_core::solanacdn::PopPubkeyPinningMode::Off,
+                "enforce" => solana_core::solanacdn::PopPubkeyPinningMode::Enforce,
+                _ => solana_core::solanacdn::PopPubkeyPinningMode::Warn,
+            };
             cfg.tls_ca_cert_path = matches
                 .value_of("solanacdn_tls_ca_cert_path")
                 .map(PathBuf::from);
@@ -601,6 +609,8 @@ pub fn execute(
             cfg.pipe_api_timeout_ms = value_t!(matches, "solanacdn_api_timeout_ms", u64)
                 .unwrap_or(2_000)
                 .max(250);
+            cfg.pipe_api_verify_refresh_ms =
+                value_t!(matches, "solanacdn_api_verify_refresh_ms", u64).unwrap_or(3_600_000);
             cfg.pipe_api_tls_ca_cert_path = matches
                 .value_of("solanacdn_api_tls_ca_cert_path")
                 .map(PathBuf::from);
@@ -643,6 +653,12 @@ pub fn execute(
                 cfg.vote_dedup_max_entries = if v == 0 { 0 } else { v.min(2_000_000) };
             }
             cfg.metrics_listen_addr = value_t!(matches, "solanacdn_metrics_addr", SocketAddr).ok();
+            cfg.metrics_auth_token = matches
+                .value_of("solanacdn_metrics_auth_token")
+                .map(|s| s.to_string())
+                .or_else(|| std::env::var("SOLANACDN_METRICS_TOKEN").ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
 
             cfg.race_enabled = matches
                 .value_of("solanacdn_race")
