@@ -3811,7 +3811,7 @@ dependencies = [
  "hash32 0.2.1",
  "rustc_version 0.4.1",
  "serde",
- "spin",
+ "spin 0.9.8",
  "stable_deref_trait",
 ]
 
@@ -6803,7 +6803,7 @@ version = "0.103.6"
 source = "git+https://github.com/anza-xyz/rustls-webpki?tag=anza-rustsec-2026-0049-0.103.6#aea57bff30e8085466e72ccaab42678100a92005"
 dependencies = [
  "aws-lc-rs",
- "ring",
+ "ring 0.17.14",
  "rustls-pki-types",
  "untrusted 0.9.0",
 ]
@@ -8568,7 +8568,7 @@ dependencies = [
  "rolling-file",
  "rts-alloc",
  "rustls 0.23.34",
- "rustls-native-certs",
+ "rustls-native-certs 0.8.1",
  "serde",
  "serde_bytes",
  "serde_json",
@@ -8682,8 +8682,8 @@ dependencies = [
  "thiserror 2.0.17",
  "tikv-jemallocator",
  "tokio",
- "tokio-stream",
  "tokio-rustls 0.26.2",
+ "tokio-stream",
  "tokio-util 0.7.16",
  "tonic",
  "tonic-build",
