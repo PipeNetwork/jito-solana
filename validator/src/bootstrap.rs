@@ -1,12 +1,11 @@
 use {
     agave_snapshots::{
-        ArchiveFormat,
-        SnapshotArchiveKind, paths as snapshot_paths,
+        ArchiveFormat, paths as snapshot_paths,
         snapshot_archive_info::SnapshotArchiveInfoGetter as _,
     },
     itertools::Itertools,
     log::*,
-    rand::{Rng, rng, seq::SliceRandom},
+    rand::{rng, seq::SliceRandom},
     rayon::prelude::*,
     reqwest::Url,
     reqwest::blocking::Client as HttpClient,
@@ -33,7 +32,7 @@ use {
     solana_vote_program::vote_state::VoteStateV4,
     std::{
         collections::{
-            HashMap, HashSet,
+            HashSet,
             hash_map::{DefaultHasher, RandomState},
         },
         fs,
@@ -43,9 +42,9 @@ use {
         path::Path,
         process::exit,
         sync::{
+            Arc, RwLock,
             atomic::{AtomicBool, Ordering},
             mpsc,
-            Arc, RwLock,
         },
         thread,
         time::{Duration, Instant},
@@ -182,7 +181,10 @@ fn bootstrap_rpc_peers_from_config(
     bootstrap_config: &RpcBootstrapConfig,
 ) -> Option<Vec<ContactInfo>> {
     let mut addrs = bootstrap_config.bootstrap_rpc_addrs.clone();
-    let url = bootstrap_config.bootstrap_rpc_addrs_url.as_deref().map(str::trim);
+    let url = bootstrap_config
+        .bootstrap_rpc_addrs_url
+        .as_deref()
+        .map(str::trim);
     if let Some(url) = url.filter(|s| !s.is_empty()) {
         match Url::parse(url) {
             Ok(url) => {
@@ -196,13 +198,15 @@ fn bootstrap_rpc_peers_from_config(
                 {
                     Ok(mut fetched) => addrs.append(&mut fetched),
                     Err(err) => {
-                        warn!("bootstrap rpc addrs url fetch failed; falling back to gossip discovery: {err}");
+                        warn!(
+                            "bootstrap rpc addrs url fetch failed; falling back to gossip discovery: {err}"
+                        );
                     }
                 }
             }
-            Err(err) => warn!(
-                "invalid --bootstrap-rpc-addrs-url; falling back to gossip discovery: {err}"
-            ),
+            Err(err) => {
+                warn!("invalid --bootstrap-rpc-addrs-url; falling back to gossip discovery: {err}")
+            }
         }
     }
 
@@ -921,11 +925,12 @@ fn get_rpc_nodes(
         let snapshot_hash = if bootstrap_config.no_snapshot_fetch {
             None
         } else {
-            let manifest_url = Url::parse(&bootstrap_config.snapshot_manifest_url).map_err(|e| {
-                GetRpcNodeError::SnapshotManifestError(format!(
-                    "invalid --snapshot-manifest-url: {e}"
-                ))
-            })?;
+            let manifest_url =
+                Url::parse(&bootstrap_config.snapshot_manifest_url).map_err(|e| {
+                    GetRpcNodeError::SnapshotManifestError(format!(
+                        "invalid --snapshot-manifest-url: {e}"
+                    ))
+                })?;
             let timeout = Duration::from_millis(bootstrap_config.snapshot_download_timeout_ms);
             let client = HttpClient::builder()
                 .timeout(timeout)
@@ -1003,7 +1008,7 @@ fn get_highest_local_snapshot_hash(
 /// Map full snapshot hashes to a set of incremental snapshot hashes.  Each full snapshot hash
 /// is treated as the base for its set of incremental snapshot hashes.
 #[cfg(test)]
-type KnownSnapshotHashes = HashMap<(Slot, Hash), HashSet<(Slot, Hash)>>;
+type KnownSnapshotHashes = std::collections::HashMap<(Slot, Hash), HashSet<(Slot, Hash)>>;
 /// Build the known snapshot hashes from a set of nodes.
 ///
 /// The `get_snapshot_hashes_for_node` parameter is a function that map a pubkey to its snapshot
@@ -1212,7 +1217,8 @@ fn parse_full_snapshot_from_manifest(
         .and_then(|s| s.to_str())
         .ok_or_else(|| format!("invalid snapshot filename in manifest: {}", entry.filename))?;
     let (slot, hash, archive_format) =
-        snapshot_paths::parse_full_snapshot_archive_filename(filename).map_err(|e| e.to_string())?;
+        snapshot_paths::parse_full_snapshot_archive_filename(filename)
+            .map_err(|e| e.to_string())?;
     if slot != entry.slot {
         return Err(format!(
             "snapshot manifest mismatch: filename slot {slot} != field slot {} ({})",
@@ -1362,7 +1368,12 @@ fn download_http_file_concurrent_ranges(
     let file_name = destination_path
         .file_name()
         .and_then(|s| s.to_str())
-        .ok_or_else(|| format!("invalid snapshot destination: {}", destination_path.display()))?;
+        .ok_or_else(|| {
+            format!(
+                "invalid snapshot destination: {}",
+                destination_path.display()
+            )
+        })?;
     let tmp_path = destination_path.with_file_name(format!("{file_name}.part"));
     let _ = fs::remove_file(&tmp_path);
 
@@ -1423,8 +1434,7 @@ fn download_http_file_concurrent_ranges(
                 let dt = now.duration_since(last_at).as_secs_f64().max(0.001);
                 let mib_per_sec = (delta_bytes as f64) / (1024.0 * 1024.0) / dt;
 
-                let pct = ((bytes as f64) / (expected_size_bytes as f64) * 100.0)
-                    .clamp(0.0, 100.0);
+                let pct = ((bytes as f64) / (expected_size_bytes as f64) * 100.0).clamp(0.0, 100.0);
 
                 info!(
                     "Snapshot download progress {}: {:.1}% ({}/{}) at {:.1} MiB/s",
@@ -1474,8 +1484,9 @@ fn download_http_file_concurrent_ranges(
                     let mut attempt: u32 = 0;
                     loop {
                         attempt = attempt.saturating_add(1);
-                        match download_http_range_to_file(&client, &url, &mut file, start, end, &mut buf)
-                        {
+                        match download_http_range_to_file(
+                            &client, &url, &mut file, start, end, &mut buf,
+                        ) {
                             Ok(()) => {
                                 let n = end.saturating_sub(start).saturating_add(1);
                                 downloaded_bytes.fetch_add(n, Ordering::Relaxed);
@@ -1487,7 +1498,9 @@ fn download_http_file_concurrent_ranges(
                                     stop.store(true, Ordering::Relaxed);
                                     return;
                                 }
-                                thread::sleep(Duration::from_millis(200_u64.saturating_mul(attempt as u64)));
+                                thread::sleep(Duration::from_millis(
+                                    200_u64.saturating_mul(attempt as u64),
+                                ));
                             }
                         }
                     }
@@ -1611,7 +1624,8 @@ fn download_snapshots(
             full_snapshot_hash.0, full_snapshot_hash.1
         );
     } else {
-        let remote_dir = snapshot_paths::build_snapshot_archives_remote_dir(full_snapshot_archives_dir);
+        let remote_dir =
+            snapshot_paths::build_snapshot_archives_remote_dir(full_snapshot_archives_dir);
         fs::create_dir_all(&remote_dir).map_err(|e| {
             format!(
                 "failed to create full snapshot download dir {}: {e}",
@@ -1759,8 +1773,8 @@ fn should_use_local_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
     use std::net::TcpListener;
+    use std::sync::atomic::AtomicUsize;
 
     impl PeerSnapshotHash {
         fn new(
@@ -1787,12 +1801,7 @@ mod tests {
         let rpc_id = Pubkey::new_unique();
 
         let mut blacklist = HashSet::new();
-        fail_rpc_node(
-            "test error".to_string(),
-            &None,
-            &rpc_id,
-            &mut blacklist,
-        );
+        fail_rpc_node("test error".to_string(), &None, &rpc_id, &mut blacklist);
         assert!(blacklist.contains(&rpc_id));
 
         let known_validators: HashSet<Pubkey> = [rpc_id].into_iter().collect();
@@ -1894,7 +1903,13 @@ mod tests {
 
         assert_eq!(full.slot, 100);
         assert_eq!(full.hash, full_hash);
-        assert_eq!(full.url.as_str(), &format!("https://data.example.com/{}", manifest.full_snapshot.filename));
+        assert_eq!(
+            full.url.as_str(),
+            &format!(
+                "https://data.example.com/{}",
+                manifest.full_snapshot.filename
+            )
+        );
 
         let incremental = incremental.unwrap();
         assert_eq!(incremental.slot, 102);
@@ -1906,9 +1921,7 @@ mod tests {
         let chunk_size: u64 = 64 * 1024;
         let concurrency: usize = 4;
 
-        let content: Vec<u8> = (0..(1024 * 1024))
-            .map(|i| (i % 251) as u8)
-            .collect();
+        let content: Vec<u8> = (0..(1024 * 1024)).map(|i| (i % 251) as u8).collect();
         let content_server = content.clone();
         let total_size = content.len() as u64;
 
@@ -1999,7 +2012,7 @@ mod tests {
     fn download_snapshots_from_manifest_uses_ranges_and_skips_redownload() {
         struct SnapshotHttpServerState {
             manifest_body: Vec<u8>,
-            files: HashMap<String, Vec<u8>>,
+            files: std::collections::HashMap<String, Vec<u8>>,
             manifest_requests: AtomicUsize,
             range_requests: AtomicUsize,
         }
@@ -2013,7 +2026,10 @@ mod tests {
             stream.write_all(body).unwrap();
         }
 
-        fn handle_http_connection(mut stream: std::net::TcpStream, state: Arc<SnapshotHttpServerState>) {
+        fn handle_http_connection(
+            mut stream: std::net::TcpStream,
+            state: Arc<SnapshotHttpServerState>,
+        ) {
             stream.set_nonblocking(false).unwrap();
 
             let mut req = Vec::new();
@@ -2104,12 +2120,9 @@ mod tests {
             "incremental-snapshot-{full_slot}-{incremental_slot}-{incremental_hash}.tar.zst"
         );
 
-        let full_content: Vec<u8> = (0..(3 * 1024 * 1024))
-            .map(|i| (i % 251) as u8)
-            .collect();
-        let incremental_content: Vec<u8> = (0..(2 * 1024 * 1024))
-            .map(|i| (i % 241) as u8)
-            .collect();
+        let full_content: Vec<u8> = (0..(3 * 1024 * 1024)).map(|i| (i % 251) as u8).collect();
+        let incremental_content: Vec<u8> =
+            (0..(2 * 1024 * 1024)).map(|i| (i % 241) as u8).collect();
 
         let manifest_body = serde_json::json!({
             "updated_at": "2026-01-01T00:00:00Z",
@@ -2128,7 +2141,7 @@ mod tests {
         .to_string()
         .into_bytes();
 
-        let mut files = HashMap::new();
+        let mut files = std::collections::HashMap::new();
         files.insert(format!("/snapshots/{full_file}"), full_content.clone());
         files.insert(
             format!("/snapshots/{incremental_file}"),
@@ -2176,7 +2189,9 @@ mod tests {
 
         let mut validator_config = ValidatorConfig::default_for_test();
         validator_config.snapshot_config.full_snapshot_archives_dir = full_dir.clone();
-        validator_config.snapshot_config.incremental_snapshot_archives_dir = incremental_dir.clone();
+        validator_config
+            .snapshot_config
+            .incremental_snapshot_archives_dir = incremental_dir.clone();
 
         let bootstrap_config = RpcBootstrapConfig {
             no_genesis_fetch: false,
@@ -2218,11 +2233,16 @@ mod tests {
         let full_remote = snapshot_paths::build_snapshot_archives_remote_dir(&full_dir);
         let (slot, hash, archive_format) =
             snapshot_paths::parse_full_snapshot_archive_filename(&full_file).unwrap();
-        let full_path =
-            snapshot_paths::build_full_snapshot_archive_path(&full_remote, slot, &hash, archive_format);
+        let full_path = snapshot_paths::build_full_snapshot_archive_path(
+            &full_remote,
+            slot,
+            &hash,
+            archive_format,
+        );
         assert_eq!(fs::read(&full_path).unwrap(), full_content);
 
-        let incremental_remote = snapshot_paths::build_snapshot_archives_remote_dir(&incremental_dir);
+        let incremental_remote =
+            snapshot_paths::build_snapshot_archives_remote_dir(&incremental_dir);
         let (base_slot, slot, hash, archive_format) =
             snapshot_paths::parse_incremental_snapshot_archive_filename(&incremental_file).unwrap();
         let incremental_path = snapshot_paths::build_incremental_snapshot_archive_path(
@@ -2265,7 +2285,7 @@ mod tests {
 
         // simulate a set of known validators with various snapshot hashes
         let oracle = {
-            let mut oracle = HashMap::new();
+            let mut oracle = std::collections::HashMap::new();
 
             for (full, incr) in [
                 // only a full snapshot

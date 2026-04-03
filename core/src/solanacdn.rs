@@ -2129,10 +2129,18 @@ mod tests {
         std::env::var(key).ok()
     }
 
+    fn set_env(key: &str, value: impl AsRef<std::ffi::OsStr>) {
+        unsafe { std::env::set_var(key, value) }
+    }
+
+    fn remove_env(key: &str) {
+        unsafe { std::env::remove_var(key) }
+    }
+
     fn restore_env(key: &str, value: Option<String>) {
         match value {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
+            Some(v) => set_env(key, v),
+            None => remove_env(key),
         }
     }
 
@@ -2250,13 +2258,13 @@ mod tests {
     fn test_env_trimmed_and_first_env() {
         let k1 = "SCDN_TEST_ENV_TRIMMED_1";
         let k2 = "SCDN_TEST_ENV_TRIMMED_2";
-        std::env::set_var(k1, "   ");
-        std::env::set_var(k2, "  value ");
+        set_env(k1, "   ");
+        set_env(k2, "  value ");
         assert_eq!(env_trimmed(k1), None);
         assert_eq!(env_trimmed(k2), Some("value".to_string()));
         assert_eq!(first_env(&[k1, k2]), Some("value".to_string()));
-        std::env::remove_var(k1);
-        std::env::remove_var(k2);
+        remove_env(k1);
+        remove_env(k2);
     }
 
     #[test]
@@ -3285,8 +3293,8 @@ mod tests {
     fn test_init_skips_when_no_config() {
         let saved_agent = save_env("SOLANACDN_AGENT_API_TOKEN");
         let saved_pipe = save_env("PIPE_API_KEY");
-        std::env::remove_var("SOLANACDN_AGENT_API_TOKEN");
-        std::env::remove_var("PIPE_API_KEY");
+        remove_env("SOLANACDN_AGENT_API_TOKEN");
+        remove_env("PIPE_API_KEY");
 
         set_global_for_tests(None);
         let cfg = SolanaCdnConfig::default();
@@ -4060,9 +4068,7 @@ mod tests {
                     match msg {
                         AgentToPop::UnsubscribeShreds => saw_unsubscribe = true,
                         AgentToPop::RegisterValidatorPorts { direct_shreds, .. } => {
-                            if direct_shreds {
-                                register_true += 1;
-                            } else {
+                            if !direct_shreds {
                                 register_false += 1;
                             }
                         }

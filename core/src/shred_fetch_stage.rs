@@ -517,10 +517,10 @@ mod tests {
             shred::Shredder,
         },
         solana_gossip::contact_info::ContactInfo,
-        solana_perf::packet::PinnedPacketBatch,
+        solana_net_utils::SocketAddrSpace,
+        solana_perf::packet::RecycledPacketBatch,
         solana_runtime::bank::Bank,
         solana_signer::Signer,
-        solana_streamer::socket::SocketAddrSpace,
         solana_time_utils::timestamp,
         std::net::{IpAddr, Ipv4Addr, SocketAddr},
     };
@@ -575,7 +575,7 @@ mod tests {
         packet.meta_mut().flags |= PacketFlags::REPAIR;
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234);
         packet.meta_mut().set_socket_addr(&addr);
-        let batch = PacketBatch::from(PinnedPacketBatch::new(vec![packet]));
+        let batch = PacketBatch::from(RecycledPacketBatch::new(vec![packet]));
 
         let (input_tx, input_rx) = unbounded();
         let (sendr, output_rx) = EvictingSender::new_bounded(1);
