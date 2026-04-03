@@ -544,16 +544,12 @@ pub fn broadcast_shreds(
                 crate::solanacdn_hooks::try_publish_leader_tvu_shred(payload.bytes.clone());
 
                 let key = shred.id();
-                cluster_nodes
+                let addr = cluster_nodes
                     .get_broadcast_peer(&key)?
-                    .tvu(protocol)
-                    .filter(|addr| socket_addr_space.check(addr))
-                    .map(|addr| {
-                        (match protocol {
-                            Protocol::QUIC => Either::Right,
-                            Protocol::UDP => Either::Left,
-                        })((payload, addr))
-                    })
+                    .tvu(Protocol::UDP)
+                    .filter(|addr| socket_addr_space.check(addr))?;
+
+                Some((payload, addr))
             })
         })
         .collect();

@@ -30,7 +30,7 @@ use {
     solana_pubkey::Pubkey,
     solana_runtime::{
         bank::Bank,
-        bank_forks::{BankPair, SharableBanks},
+        bank_forks::{BankForks, BankPair, SharableBanks},
     },
     solana_runtime_transaction::{
         runtime_transaction::RuntimeTransaction, transaction_meta::StaticMeta,
@@ -40,7 +40,10 @@ use {
     solana_svm_transaction::svm_message::SVMMessage,
     solana_transaction::sanitized::MessageHash,
     solana_transaction_error::TransactionError,
-    std::time::Instant,
+    std::{
+        sync::{Arc, RwLock},
+        time::Instant,
+    },
 };
 
 #[derive(Debug)]
@@ -238,6 +241,7 @@ pub enum PacketHandlingError {
 }
 
 impl TransactionViewReceiveAndBuffer {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(
         receiver: BankingPacketReceiver,
         bank_forks: Arc<RwLock<BankForks>>,
@@ -245,7 +249,7 @@ impl TransactionViewReceiveAndBuffer {
     ) -> Self {
         Self {
             receiver,
-            bank_forks,
+            sharable_banks: bank_forks.read().unwrap().sharable_banks(),
             blacklisted_accounts,
         }
     }

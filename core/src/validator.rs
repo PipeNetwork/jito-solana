@@ -785,11 +785,13 @@ impl Validator {
         if let Some(solanacdn_cfg) = config.solanacdn.as_ref().cloned() {
             let tpu_port = node
                 .sockets
-                .tpu
+                .tpu_quic
                 .first()
-                .ok_or_else(|| ValidatorError::Other("missing TPU socket".to_string()))?
+                .ok_or_else(|| ValidatorError::Other("missing TPU QUIC socket".to_string()))?
                 .local_addr()
-                .map_err(|e| ValidatorError::Other(format!("failed to read TPU socket addr: {e}")))?
+                .map_err(|e| {
+                    ValidatorError::Other(format!("failed to read TPU QUIC socket addr: {e}"))
+                })?
                 .port();
             let tpu_vote_port = node
                 .sockets

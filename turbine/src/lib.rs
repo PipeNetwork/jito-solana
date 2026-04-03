@@ -14,8 +14,6 @@ pub mod retransmit_stage;
 pub mod sigverify_shreds;
 
 pub mod solanacdn_hooks;
-
-pub mod xdp;
 #[macro_use]
 extern crate log;
 
