@@ -2487,9 +2487,8 @@ impl<'a> ProcessBlockStore<'a> {
                             let now = Instant::now();
                             if now >= next_log {
                                 let total_slots = max_slot.saturating_sub(start_slot);
-                                let processed_slots = slot
-                                    .saturating_sub(start_slot)
-                                    .min(total_slots);
+                                let processed_slots =
+                                    slot.saturating_sub(start_slot).min(total_slots);
                                 let remaining_slots = total_slots.saturating_sub(processed_slots);
 
                                 let pct = if total_slots > 0 {
@@ -2531,7 +2530,8 @@ impl<'a> ProcessBlockStore<'a> {
 
                                 let filled = ((pct / 100.0) * (PROGRESS_BAR_WIDTH as f64))
                                     .floor()
-                                    .clamp(0.0, PROGRESS_BAR_WIDTH as f64) as usize;
+                                    .clamp(0.0, PROGRESS_BAR_WIDTH as f64)
+                                    as usize;
                                 let progress_bar = format!(
                                     "{}{}",
                                     "#".repeat(filled),
@@ -2539,13 +2539,9 @@ impl<'a> ProcessBlockStore<'a> {
                                 );
 
                                 info!(
-                                    "Ledger restore progress: [{}] {:.1}% (slot {}/{}) at {:.1} slots/s (ETA {})",
-                                    progress_bar,
-                                    pct,
-                                    slot,
-                                    max_slot,
-                                    slots_per_sec,
-                                    eta_str
+                                    "Ledger restore progress: [{}] {:.1}% (slot {}/{}) at {:.1} \
+                                     slots/s (ETA {})",
+                                    progress_bar, pct, slot, max_slot, slots_per_sec, eta_str
                                 );
 
                                 last_slot = slot;
